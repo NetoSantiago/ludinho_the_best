@@ -2,17 +2,24 @@ from typing import List, Dict, Any
 import shortuuid
 from services.supabase_client import get_client
 
-def get_or_create_open_container(telefone: str) -> str:
+def get_or_create_open_container(cliente_id):
     supa = get_client()
-    res = supa.table("containers").select("*").eq("telefone_cliente", telefone).eq("status","ABERTO").order("created_at", desc=True).limit(1).execute()
-    rows = res.data or []
-    if rows:
-        return rows[0]["id"]
-    
-    container_id = f"{telefone}-{shortuuid.ShortUUID().random(length=7)}"
-    supa.table("containers").insert({"id": container_id, "telefone_cliente": telefone, "status": "ABERTO"}).execute()
+    container = supa.table("containers") \
+        .select("*") \
+        .eq("cliente_id", cliente_id) \
+        .eq("status", "ABERTO") \
+        .maybe_single() \
+        .execute()
 
-    return container_id
+    if not container or not container.data:
+        # Criar novo container se não existir
+        novo_container = supa.table("containers").insert({
+            "cliente_id": cliente_id,
+            "status": "ABERTO"
+        }).execute()
+        return novo_container.data[0] if novo_container and novo_container.data else None
+
+    return container.data
 
 def list_container_items(container_id: str) -> List[Dict[str, Any]]:
     supa = get_client()
@@ -47,5 +54,5 @@ def add_item_by_movimento(tipo: str, telefone: str, jogo_id: str, preco: float, 
 
 def list_container_by_status(status: str):
     supa = get_client()
-    
+
     return (supa.table("containers").select("*").eq("status", status).execute().data or [])
