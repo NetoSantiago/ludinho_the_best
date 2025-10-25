@@ -1,25 +1,43 @@
-from typing import List, Dict, Any
-import shortuuid
+from typing import List, Dict, Any, Optional
+
 from services.supabase_client import get_client
 
-def get_or_create_open_container(cliente_id):
+
+def _first_record(res: Any) -> Optional[Dict[str, Any]]:
+    data = getattr(res, "data", None)
+    if data is None and isinstance(res, dict):
+        data = res.get("data")
+    if isinstance(data, list):
+        return data[0] if data else None
+    return data
+
+
+def get_or_create_open_container(cliente_id: str) -> Optional[str]:
+    cliente_id = (cliente_id or "").strip()
+    if not cliente_id:
+        return None
+
     supa = get_client()
-    container = supa.table("containers") \
-        .select("*") \
-        .eq("cliente_id", cliente_id) \
-        .eq("status", "ABERTO") \
-        .maybe_single() \
+    container = (
+        supa.table("containers")
+        .select("*")
+        .eq("cliente_id", cliente_id)
+        .eq("status", "ABERTO")
+        .maybe_single()
         .execute()
+    )
 
-    if not container or not container.data:
-        # Criar novo container se não existir
-        novo_container = supa.table("containers").insert({
-            "cliente_id": cliente_id,
-            "status": "ABERTO"
-        }).execute()
-        return novo_container.data[0] if novo_container and novo_container.data else None
+    existing = _first_record(container)
+    if existing and existing.get("id"):
+        return existing["id"]
 
-    return container.data
+    novo_container = (
+        supa.table("containers")
+        .insert({"cliente_id": cliente_id, "status": "ABERTO"})
+        .execute()
+    )
+    created = _first_record(novo_container)
+    return created.get("id") if created else None
 
 def list_container_items(container_id: str) -> List[Dict[str, Any]]:
     supa = get_client()
@@ -30,6 +48,8 @@ def list_container_items(container_id: str) -> List[Dict[str, Any]]:
 def add_item_by_movimento(tipo: str, telefone: str, jogo_id: str, preco: float, status_item: str) -> Dict[str, Any]:
     supa = get_client()
     container_id = get_or_create_open_container(telefone)
+    if not container_id:
+        raise RuntimeError("Não foi possível criar ou localizar o container do cliente.")
 
     it = supa.table("container_itens").insert({
         "container_id": container_id,

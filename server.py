@@ -188,6 +188,9 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
     if upper.startswith("CONTAINER"):
         try:
             container_id = get_or_create_open_container(telefone)
+            if not container_id:
+                await send_message(telefone, "Não achei seu cadastro. Confirme o telefone informado e tente novamente.")
+                return {"ok": True}
             itens = list_container_items(container_id)
             await send_message(telefone, render_container(itens))
         except Exception as e:
@@ -278,6 +281,9 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
     if upper.startswith("TROCAR"):
         try:
             container_id = get_or_create_open_container(telefone)
+            if not container_id:
+                await send_message(telefone, "Não encontrei um container ativo para você ainda. Confirme seu telefone ou fale com o suporte.")
+                return {"ok": True}
             itens = list_container_items(container_id)
             elegiveis = list_elegiveis(itens)
             if not elegiveis:
@@ -304,6 +310,9 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
         if upper in {"S", "SIM", "CONFIRMO"}:
             try:
                 container_id = get_or_create_open_container(telefone)
+                if not container_id:
+                    await send_message(telefone, "Não encontrei seu container aberto. Confirme o telefone e tente novamente.")
+                    return {"ok": True}
                 itens = list_container_items(container_id)
                 snapshot = [{
                     "jogo": (it.get("jogos") or {}).get("nome", "Jogo"),
@@ -342,6 +351,9 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
     if upper.startswith("ENVIAR"):
         try:
             container_id = get_or_create_open_container(telefone)
+            if not container_id:
+                await send_message(telefone, "Ainda não temos um container ativo vinculado a este telefone.")
+                return {"ok": True}
             itens = list_container_items(container_id) or []
             resumo = "\n".join([f"- {(it.get('jogos') or {}).get('nome','Jogo')} ({it.get('origem')}, {it.get('status_item')})" for it in itens]) or "—"
             try:
