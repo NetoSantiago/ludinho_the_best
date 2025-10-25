@@ -29,3 +29,20 @@ async def send_message(to: str, text: str) -> dict:
         r = await client.post(url, headers=headers, json=payload)
         r.raise_for_status()
         return r.json()
+
+
+def send_message_sync(to: str, text: str) -> dict:
+    if not WA_BEARER:
+        raise RuntimeError("WA_BEARER ausente. Gere o token no WPPConnect e defina no .env")
+
+    url = f"{WA_BASE_URL}/api/{WA_SESSION}/send-message"
+    headers = {
+        "Authorization": f"Bearer {WA_BEARER}",
+        "Content-Type": "application/json",
+    }
+    payload = {"phone": to, "message": text}
+
+    with httpx.Client(timeout=20) as client:
+        r = client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json()

@@ -1,6 +1,6 @@
-import streamlit as st, pandas as pd, asyncio
+import streamlit as st, pandas as pd
 from services.envios_service import listar_envios, atualizar_status_envio
-from services.whatsapp_service import send_message
+from services.whatsapp_service import send_message_sync
 
 st.title("Pedidos de Envio")
 
@@ -23,7 +23,7 @@ if col1.button("Atualizar status") and envio_id:
 
 if col2.button("Notificar via WhatsApp") and telefone and envio_id:
     try:
-        asyncio.run(send_message(telefone, f"Seu pedido {envio_id} agora está: {novo_status}."))
+        send_message_sync(telefone, f"Seu pedido {envio_id} agora está: {novo_status}.")
         st.success("Notificado!")
     except Exception as e:
         st.error(str(e))
