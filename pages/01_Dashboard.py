@@ -11,8 +11,12 @@ except Exception as e:
     st.metric("Passivo de Ludocoins (L$)", "—")
 
 try:
-    df = containers_por_status()
-    total_abertos = int(df[df["status"]=="ABERTO"]["quantidade"].sum()) if not df.empty else 0
+    table = containers_por_status()
+    total_abertos = (
+        sum(row.get("quantidade", 0) for row in table.as_streamlit_data() if row.get("status") == "ABERTO")
+        if not table.empty
+        else 0
+    )
 except Exception:
     total_abertos = 0
     

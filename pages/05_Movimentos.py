@@ -1,6 +1,7 @@
-import streamlit as st, pandas as pd
+import streamlit as st
 from services.containers_service import add_item_by_movimento
 from services.movimentos_service import list_movimentos
+from services.table_utils import TableData
 
 st.title("Movimentos (Compra/Rifa)")
 with st.form("add_mov"):
@@ -17,8 +18,8 @@ with st.form("add_mov"):
             st.error(str(e))
 
 st.subheader("Últimos movimentos")
-df = pd.DataFrame(list_movimentos(100))
-st.dataframe(df, use_container_width=True)
+table = TableData.from_records(list_movimentos(100))
+st.dataframe(table.as_streamlit_data(), use_container_width=True)
 
-if not df.empty:
-    st.download_button("Exportar CSV", df.to_csv(index=False), "movimentos.csv", "text/csv")
+if not table.empty:
+    st.download_button("Exportar CSV", table.to_csv(), "movimentos.csv", "text/csv")
