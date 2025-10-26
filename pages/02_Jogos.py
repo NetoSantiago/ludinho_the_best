@@ -1,5 +1,6 @@
-import streamlit as st, pandas as pd
+import streamlit as st
 from services.supabase_client import get_client
+from services.table_utils import TableData
 
 st.title("Jogos")
 supa = get_client()
@@ -20,9 +21,8 @@ with st.form("novo_jogo"):
         }).execute()
         st.success("Jogo salvo!")
 res = supa.table("jogos").select("*").order("created_at", desc=True).execute()
+table = TableData.from_records(res.data)
+st.dataframe(table.as_streamlit_data(), use_container_width=True)
 
-df = pd.DataFrame(res.data or [])
-st.dataframe(df, use_container_width=True)
-
-if not df.empty:
-    st.download_button("Exportar CSV", df.to_csv(index=False), "jogos.csv", "text/csv")
+if not table.empty:
+    st.download_button("Exportar CSV", table.to_csv(), "jogos.csv", "text/csv")

@@ -1,8 +1,9 @@
 import re
 
-import streamlit as st, pandas as pd
+import streamlit as st
 from services.containers_service import get_or_create_open_container, list_container_items
 from services.ludocoins_service import convert_item
+from services.table_utils import TableData
 
 st.title("Containers")
 
@@ -29,16 +30,19 @@ cid = st.session_state.get("container_id")
 if cid:
     st.info(f"Container atual: {cid}")
     itens = list_container_items(cid)
-    df = pd.DataFrame([{
-        "id": it["id"],
-        "jogo": (it.get("jogos") or {}).get("nome","Jogo"),
-        "origem": it["origem"],
-        "status_item": it["status_item"],
-        "preco_aplicado_brl": it["preco_aplicado_brl"],
-        "elegivel_ludocoin": it["elegivel_ludocoin"]
-    } for it in itens])
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
+    table = TableData.from_records([
+        {
+            "id": it.get("id"),
+            "jogo": (it.get("jogos") or {}).get("nome", "Jogo"),
+            "origem": it.get("origem"),
+            "status_item": it.get("status_item"),
+            "preco_aplicado_brl": it.get("preco_aplicado_brl"),
+            "elegivel_ludocoin": it.get("elegivel_ludocoin"),
+        }
+        for it in itens
+    ])
+    if not table.empty:
+        st.dataframe(table.as_streamlit_data(), use_container_width=True)
     else:
         st.info("Este container ainda não possui itens cadastrados.")
     st.subheader("Converter item elegível")

@@ -1,13 +1,14 @@
-import streamlit as st, pandas as pd
+import streamlit as st
 from services.envios_service import listar_envios, atualizar_status_envio
 from services.whatsapp_service import send_message_sync
+from services.table_utils import TableData
 
 st.title("Pedidos de Envio")
 
 status = st.selectbox("Filtrar status", ["Todos","PENDENTE","EM_PREPARACAO","ENVIADO","CANCELADO"])
 data = listar_envios(None if status=="Todos" else status)
-df = pd.DataFrame(data or [])
-st.dataframe(df, use_container_width=True)
+table = TableData.from_records(data)
+st.dataframe(table.as_streamlit_data(), use_container_width=True)
 st.subheader("Atualizar & Notificar")
 envio_id = st.text_input("ID do envio")
 novo_status = st.selectbox("Novo status", ["PENDENTE","EM_PREPARACAO","ENVIADO","CANCELADO"])

@@ -3,18 +3,18 @@ from services.reports_service import inventario_por_status, containers_por_statu
 
 st.title("Relatórios")
 st.subheader("Inventário por status")
-df1 = inventario_por_status()
-st.dataframe(df1, use_container_width=True)
+table_inv = inventario_por_status()
+st.dataframe(table_inv.as_streamlit_data(), use_container_width=True)
 
-if not df1.empty:
-    st.download_button("Exportar CSV", df1.to_csv(index=False), "inventario_por_status.csv", "text/csv")
+if not table_inv.empty:
+    st.download_button("Exportar CSV", table_inv.to_csv(), "inventario_por_status.csv", "text/csv")
 st.subheader("Containers por status")
 
-df2 = containers_por_status()
-st.dataframe(df2, use_container_width=True)
+table_containers = containers_por_status()
+st.dataframe(table_containers.as_streamlit_data(), use_container_width=True)
 
-if not df2.empty:
-    st.download_button("Exportar CSV", df2.to_csv(index=False), "containers_por_status.csv", "text/csv")
+if not table_containers.empty:
+    st.download_button("Exportar CSV", table_containers.to_csv(), "containers_por_status.csv", "text/csv")
 st.subheader("Passivo total de Ludocoins")
 try:
     st.metric("Total (L$)", f"{passivo_ludocoins():.2f}")
