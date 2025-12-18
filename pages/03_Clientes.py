@@ -1,9 +1,21 @@
-import streamlit as st
+import streamlit as st, pandas as pd
 from services.supabase_client import get_client
-from services.table_utils import TableData
+from services.utils import format_ts
 
 st.title("Clientes")
 supa = get_client()
+
+# ====== Auth guard ======
+if not st.session_state.get("auth_ok"):
+    st.info("Acesso restrito. Vá para a página **Login** no menu lateral e autentique-se.")
+    st.stop()
+
+# (opcional) botão de sair na sidebar
+with st.sidebar:
+    st.caption(f"Logado como: {st.session_state.get('auth_user_name','?')}")
+    if st.button("Sair"):
+        st.session_state.clear()
+        st.rerun()
 
 with st.form("novo_cliente"):
     telefone = st.text_input("Telefone (PK)")
@@ -14,8 +26,9 @@ with st.form("novo_cliente"):
         st.success("Cliente salvo!")
 
 res = supa.table("clientes").select("*").order("created_at", desc=True).execute()
-table = TableData.from_records(res.data)
-st.dataframe(table.as_streamlit_data(), use_container_width=True)
+df = pd.DataFrame(res.data or [])
+df = format_ts(df)
+st.dataframe(df, use_container_width=True)
 
-if not table.empty:
-    st.download_button("Exportar CSV", table.to_csv(), "clientes.csv", "text/csv")
+if not df.empty:
+    st.download_button("Exportar CSV", df.to_csv(index=False), "clientes.csv", "text/csv")

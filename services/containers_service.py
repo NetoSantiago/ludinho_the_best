@@ -1,78 +1,136 @@
-from typing import List, Dict, Any, Optional
+from __future__ import annotations
+from typing import List, Dict, Any
+import shortuuid
 
 from services.supabase_client import get_client
 
 
-def _first_record(res: Any) -> Optional[Dict[str, Any]]:
-    data = getattr(res, "data", None)
-    if data is None and isinstance(res, dict):
-        data = res.get("data")
-    if isinstance(data, list):
-        return data[0] if data else None
-    return data
+def _phone_container_id(telefone: str) -> str:
+    # id legível + único
+    return f"{telefone}-{shortuuid.ShortUUID().random(length=6).upper()}"
 
 
-def get_or_create_open_container(cliente_id: str) -> Optional[str]:
-    cliente_id = (cliente_id or "").strip()
-    if not cliente_id:
-        return None
+def _has_items(supa, container_id: str) -> bool:
+    """
+    Evita count/head (que podem gerar 204). Apenas tenta pegar 1 item.
+    """
+    try:
+        r = (
+            supa.table("container_itens")
+            .select("id")
+            .eq("container_id", container_id)
+            .limit(1)
+            .execute()
+        )
+        data = getattr(r, "data", None) or []
+        return len(data) > 0
+    except Exception as e:
+        # Em caso de erro no PostgREST, assuma vazio (não quebra o fluxo)
+        print("containers_service._has_items error:", e)
+        return False
 
+
+def get_or_create_open_container(telefone: str) -> str:
+    """
+    Estratégia:
+      1) Se existir container ABERTO com itens (>0), retorna o MAIS RECENTE entre eles.
+      2) Senão, se existir algum ABERTO (mesmo vazio), retorna o mais recente.
+      3) Senão, cria um novo container ABERTO.
+    Tolerante a erros do PostgREST: nunca levanta exceção para o chamador.
+    """
     supa = get_client()
-    container = (
-        supa.table("containers")
-        .select("*")
-        .eq("cliente_id", cliente_id)
-        .eq("status", "ABERTO")
-        .maybe_single()
-        .execute()
-    )
 
-    existing = _first_record(container)
-    if existing and existing.get("id"):
-        return existing["id"]
+    try:
+        # Busca todos os abertos do cliente, mais recente primeiro
+        r = (
+            supa.table("containers")
+            .select("id, created_at, updated_at")
+            .eq("telefone_cliente", telefone)
+            .eq("status", "ABERTO")
+            .order("updated_at", desc=True)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        rows = getattr(r, "data", None) or []
+    except Exception as e:
+        print("containers_service.get_or_create_open_container select error:", e)
+        rows = []
 
-    novo_container = (
-        supa.table("containers")
-        .insert({"cliente_id": cliente_id, "status": "ABERTO"})
-        .execute()
-    )
-    created = _first_record(novo_container)
-    return created.get("id") if created else None
+    # 1) prioriza o aberto que tenha itens
+    for row in rows:
+        cid = row["id"]
+        if _has_items(supa, cid):
+            return cid
+
+    # 2) se nenhum com itens, devolve o mais recente (se existir)
+    if rows:
+        return rows[0]["id"]
+
+    # 3) criar um novo
+    new_id = _phone_container_id(telefone)
+    try:
+        supa.table("containers").insert({
+            "id": new_id,
+            "telefone_cliente": telefone,
+            "status": "ABERTO",
+        }).execute()
+    except Exception as e:
+        # Mesmo que falhe o insert, retornamos o id gerado para o fluxo do bot/streamlit seguir
+        print("containers_service.get_or_create_open_container insert error:", e)
+    return new_id
+
 
 def list_container_items(container_id: str) -> List[Dict[str, Any]]:
+    """
+    Lista itens (exclui RESGATADO) + join de jogo.
+    """
     supa = get_client()
-    res = supa.table("container_itens").select("*, jogos(*), movimentos(*)").eq("container_id", container_id).execute()
+    try:
+        res = (
+            supa.from_("container_itens")
+            .select("*, jogos(*)")
+            .eq("container_id", container_id)
+            .neq("status_item", "RESGATADO")
+            .execute()
+        )
+        return getattr(res, "data", None) or []
+    except Exception as e:
+        print("containers_service.list_container_items error:", e)
+        return []
 
-    return res.data or []
-
-def add_item_by_movimento(tipo: str, telefone: str, jogo_id: str, preco: float, status_item: str) -> Dict[str, Any]:
+def list_enviaveis(container_id: str) -> List[Dict[str, Any]]:
+    """
+    Itens que podem ir no envio: somente DISPONIVEL (exclui PRE-VENDA/RESGATADO).
+    """
     supa = get_client()
-    container_id = get_or_create_open_container(telefone)
-    if not container_id:
-        raise RuntimeError("Não foi possível criar ou localizar o container do cliente.")
+    try:
+        res = (
+            supa.from_("container_itens")
+            .select("*, jogos(*)")
+            .eq("container_id", container_id)
+            .eq("status_item", "DISPONIVEL")
+            .execute()
+        )
+        return getattr(res, "data", None) or []
+    except Exception as e:
+        print("containers_service.list_enviaveis error:", e)
+        return []
 
-    it = supa.table("container_itens").insert({
-        "container_id": container_id,
-        "jogo_id": jogo_id,
-        "origem": "RIFA" if tipo == "RIFA" else "COMPRA",
-        "status_item": status_item,
-        "preco_aplicado_brl": preco
-    }).execute().data[0]
-
-    mv = supa.table("movimentos").insert({
-        "tipo": tipo,
-        "telefone_cliente": telefone,
-        "jogo_id": jogo_id,
-        "preco_aplicado_brl": preco,
-        "container_id": container_id,
-        "container_item_id": it["id"]
-    }).execute().data[0]
-
-    supa.table("container_itens").update({"movimento_id": mv["id"]}).eq("id", it["id"]).execute()
-
-    return {"movimento": mv, "item": it, "container_id": container_id}
-
-def list_container_by_status(status: str):
+def list_trocaveis(container_id: str) -> List[Dict[str, Any]]:
+    """
+    Itens elegíveis a troca (LISTINHA) mesmo se PRE-VENDA, exclui RESGATADO.
+    """
     supa = get_client()
-
-    return (supa.table("containers").select("*").eq("status", status).execute().data or [])
+    try:
+        res = (
+            supa.from_("container_itens")
+            .select("*, jogos(*)")
+            .eq("container_id", container_id)
+            .eq("origem", "LISTINHA")
+            .in_("status_item", ["DISPONIVEL", "PRE-VENDA"])
+            .execute()
+        )
+        return getattr(res, "data", None) or []
+    except Exception as e:
+        print("containers_service.list_trocaveis error:", e)
+        return []

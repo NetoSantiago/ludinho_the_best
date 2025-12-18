@@ -12,6 +12,7 @@ class StateNames:
     TROCA_LISTANDO = "TROCA_LISTANDO"
     TROCA_CONFIRM = "TROCA_CONFIRM"
     ENVIAR_CONFIRM = "ENVIAR_CONFIRM"
+    COMPROVANTE_WAIT = "COMPROVANTE_WAIT"
 
 def _now_utc():
     return datetime.now(timezone.utc)

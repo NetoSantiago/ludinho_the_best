@@ -6,14 +6,22 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
-from services.whatsapp_service import send_message
 from services.supabase_client import get_client
-from services.containers_service import get_or_create_open_container, list_container_items
 from services.ludocoins_service import convert_item, get_saldo, list_ultimas_transacoes
 from services.envios_service import criar_pedido_envio
+from services.whatsapp_service import send_file
 from services.chat_state_service import (
     get_state, set_state, clear_state, StateNames
 )
+
+from services.containers_service import (
+    get_or_create_open_container,
+    list_container_items,
+    list_trocaveis,
+    list_enviaveis,
+)
+
+from services.whatsapp_service import send_message, send_file
 
 load_dotenv()
 app = FastAPI(title="Ludolovers Webhook")
@@ -32,12 +40,18 @@ def extract_phone_and_text(payload: dict):
     raw_from = payload.get("from") or payload.get("phone") or data.get("from") or data.get("chatId") or ""
     telefone = normalize_phone(raw_from)
 
+    msg_obj = data.get("message") or {}
+
+    # caption primeiro (inclui topo), depois campos de texto, por último body (pode ser base64)
     text = (
-        payload.get("text")
+        payload.get("caption")
+        or msg_obj.get("caption")
+        or data.get("caption")
+        or payload.get("text")
         or payload.get("message")
-        or payload.get("body")
-        or data.get("body")
         or data.get("text")
+        or data.get("body")
+        or payload.get("body")
         or ""
     )
     text = (text or "").strip()
@@ -51,15 +65,21 @@ def is_only_numbers_or_spaces(s: str) -> bool:
 
 def render_menu() -> str:
     return (
-        "Oi, Eu sou o *Ludinho* 🤖\n"
-        "Posso te ajudar com:\n\n"
-        "1) CONTAINER – ver seus jogos (DISPONÍVEIS e PRÉ-VENDA)\n"
-        "2) LUDOCOINS – saldo e últimas transações\n"
-        "3) TROCAR – converter jogos de *RIFA* em L$ (85%)\n"
-        "4) ENVIAR – pedir envio do seu container\n"
-        "5) AJUDA – exemplos de uso\n\n"
+        "🤖 *Ludinho* — como posso ajudar?\n\n"
+        "1) CONTAINER\n"
+        "2) LUDOCOINS\n"
+        "3) TROCAR (Listinha → L$)\n"
+        "4) ENVIAR Container\n"
+        "5) AJUDA\n"
+        "6) COMPROVANTE (enviar)\n"
+        "0) MENU (voltar)\n\n"
         "_Você pode responder pelo número (ex: 3) ou pelo texto (ex: TROCAR)._"
     )
+
+
+def is_back_to_menu(txt: str) -> bool:
+    t = (txt or "").strip().lower()
+    return t in ("0", "menu", "início", "inicio", "voltar")
 
 def render_container(itens: list[dict]) -> str:
     disponiveis, prevenda = [], []
@@ -77,13 +97,13 @@ def render_container(itens: list[dict]) -> str:
             disponiveis.append(line)
     msg = "📦 *Seu Container*\n\n*DISPONÍVEIS*\n" + ("\n".join(disponiveis) if disponiveis else "—")
     msg += "\n\n*PRÉ-VENDA*\n" + ("\n".join(prevenda) if prevenda else "—")
-    msg += "\n\nDicas: você pode *3) TROCAR* itens de RIFA por L$ ou *4) ENVIAR* seu container."
+    msg += "\n\nDicas: você pode *3) TROCAR* itens de LISTINHA por L$ ou *4) ENVIAR* seu container."
     return msg
 
 def list_elegiveis(itens: list[dict]):
     out = []
     for it in (itens or []):
-        if it.get("origem") == "RIFA" and it.get("status_item") in ("DISPONIVEL", "PRE-VENDA"):
+        if it.get("origem") == "LISTINHA" and it.get("status_item") in ("DISPONIVEL", "PRE-VENDA"):
             jogo = it.get("jogos") or {}
             nome = jogo.get("nome", "Jogo")
             valor = round(float(it.get("preco_aplicado_brl", 0) or 0) * 0.85, 2)
@@ -175,23 +195,158 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
             print("clear_state error:", e)
         await send_message(telefone, f"Perfeito, *{nome}*! 🙌\n{render_menu()}")
         return {"ok": True}
-
+    # PATCH START: menu global (0/menu/inicio) + limpar estado
     upper = (text or "").upper()
-    if upper in GREETINGS or upper in {"MENU", "AJUDA"}:
+    if upper in GREETINGS or is_back_to_menu(text):
+        try:
+            clear_state(telefone)
+        except Exception as e:
+            print("clear_state error:", e)
         await send_message(telefone, render_menu())
         return {"ok": True}
+    # PATCH END
 
-    if (text or "").strip() in {"1", "2", "3", "4", "5"}:
+    if (text or "").strip() in {"1", "2", "3", "4", "5"} and not state:
         upper = {"1": "CONTAINER", "2": "LUDOCOINS", "3": "TROCAR", "4": "ENVIAR", "5": "AJUDA"}[(text or "").strip()]
 
-    # ------- CONTAINER -------
+    # PATCH START: fluxo COMPROVANTE (stateful + atalho com 'COMPROVANTE <ID>')
+    m_comp = re.match(r"^\s*COMPROVANTE\s+([A-Za-z0-9\-\._]+)\s*$", text or "", flags=re.IGNORECASE)
+    if m_comp:
+        txid = m_comp.group(1)
+        supa = get_client()
+        cfg = supa.table("configuracoes").select("numero_recebimento_comprovantes").eq("id", 1).single().execute().data
+        destino = (cfg or {}).get("numero_recebimento_comprovantes")
+        if not destino:
+            await send_message(telefone, "Ainda não há um número configurado para receber comprovantes. Tente mais tarde.")
+            return {"ok": True}
+
+        base64_data, filename = None, None
+        try:
+            msg = (payload.get("data") or {}).get("message") or {}
+            if isinstance(msg.get("file"), dict):
+                base64_data = msg["file"].get("data")
+                filename = msg["file"].get("filename") or "comprovante"
+            elif isinstance(msg.get("mediaData"), dict):
+                base64_data = msg["mediaData"].get("data")
+                filename = msg["mediaData"].get("filename") or "comprovante"
+            else:
+                base64_data = msg.get("base64")
+                filename = msg.get("filename") or "comprovante"
+        except Exception as e:
+            print("parse comprovante media error:", e)
+
+        if not base64_data:
+            try:
+                d0 = payload or {}
+                if isinstance(d0.get("file"), dict):
+                    base64_data = d0["file"].get("data")
+                    filename = d0["file"].get("filename") or filename or "comprovante"
+                elif d0.get("base64"):
+                    base64_data = d0.get("base64")
+                    filename = d0.get("filename") or filename or "comprovante"
+                elif isinstance(d0.get("body"), str) and len(d0.get("body") or "") > 100:
+                    # body contendo base64 (imagem/pdf)
+                    base64_data = d0["body"]
+                    filename = d0.get("filename") or filename or "comprovante"
+            except Exception as e:
+                print("parse comprovante media (top-level) error:", e)
+
+        if not base64_data:
+            await send_message(telefone, "Por favor, anexe um PDF ou imagem e envie novamente com: COMPROVANTE <ID_DA_TRANSACAO>.")
+            return {"ok": True}
+
+        caption = f"Comprovante de pagamento — ID {txid}\nDe: {telefone}"
+        try:
+            send_file(destino, base64_data, filename, caption)
+            await send_message(telefone, "Comprovante encaminhado. Obrigado! ✅")
+        except Exception as e:
+            print("send_file comprovante error:", e)
+            await send_message(telefone, "Não consegui encaminhar o comprovante agora. Tente novamente mais tarde.")
+        return {"ok": True}
+
+    if (text or "").strip() == "6" or (upper.startswith("COMPROVANTE") and not m_comp):
+        try:
+            set_state(telefone, StateNames.COMPROVANTE_WAIT, {})
+        except Exception as e:
+            print("set_state error (COMPROVANTE_WAIT):", e)
+        await send_message(telefone, "Para enviar seu comprovante, anexe um PDF ou imagem e escreva: COMPROVANTE <ID_DA_TRANSACAO>")
+        return {"ok": True}
+
+    d = payload.get("data") or {}
+    print("debug: data keys =", list(d.keys()))
+    print("debug: message keys =", list((d.get("message") or {}).keys()))
+
+    try:
+        current_comp = get_state(telefone)
+    except Exception as e:
+        current_comp = None
+    if current_comp and current_comp.get("state") == StateNames.COMPROVANTE_WAIT:
+        m_comp2 = re.match(r"^\s*COMPROVANTE\s+([A-Za-z0-9\-\._]+)\s*$", text or "", flags=re.IGNORECASE)
+        if not m_comp2:
+            await send_message(telefone, "Envie a mensagem no formato: COMPROVANTE <ID_DA_TRANSACAO>, com o arquivo anexado.")
+            return {"ok": True}
+        txid = m_comp2.group(1)
+        supa = get_client()
+        cfg = supa.table("configuracoes").select("numero_recebimento_comprovantes").eq("id", 1).single().execute().data
+        destino = (cfg or {}).get("numero_recebimento_comprovantes")
+        if not destino:
+            await send_message(telefone, "Ainda não há um número configurado para receber comprovantes. Tente mais tarde.")
+            return {"ok": True}
+
+        base64_data, filename = None, None
+        try:
+            msg = (payload.get("data") or {}).get("message") or {}
+            if isinstance(msg.get("file"), dict):
+                base64_data = msg["file"].get("data")
+                filename = msg["file"].get("filename") or "comprovante"
+            elif isinstance(msg.get("mediaData"), dict):
+                base64_data = msg["mediaData"].get("data")
+                filename = msg["mediaData"].get("filename") or "comprovante"
+            else:
+                base64_data = msg.get("base64")
+                filename = msg.get("filename") or "comprovante"
+        except Exception as e:
+            print("parse comprovante media error:", e)
+
+        if not base64_data:
+            try:
+                d = payload.get("data") or {}
+                if isinstance(d.get("file"), dict):
+                    base64_data = d["file"].get("data")
+                    filename = d["file"].get("filename") or filename or "comprovante"
+                elif d.get("base64"):
+                    base64_data = d.get("base64")
+                    filename = d.get("filename") or filename or "comprovante"
+            except Exception as e:
+                print("parse comprovante media (fallback) error:", e)
+
+        if not base64_data:
+            await send_message(telefone, "Parece que não veio arquivo. Anexe um PDF/Imagem e envie novamente com: COMPROVANTE <ID_DA_TRANSACAO>.")
+            return {"ok": True}
+
+        caption = f"Comprovante de pagamento — ID {txid}\nDe: {telefone}"
+        try:
+            send_file(destino, base64_data, filename, caption)
+            await send_message(telefone, "Comprovante encaminhado. Obrigado! ✅")
+            try:
+                clear_state(telefone)
+            except Exception as e:
+                print("clear_state error (COMPROVANTE_WAIT):", e)
+            await send_message(telefone, render_menu())
+        except Exception as e:
+            print("send_file comprovante error:", e)
+            await send_message(telefone, "Não consegui encaminhar o comprovante agora. Tente novamente mais tarde.")
+        return {"ok": True}
+    # PATCH END
+
+# ------- CONTAINER -------
     if upper.startswith("CONTAINER"):
         try:
             container_id = get_or_create_open_container(telefone)
-            if not container_id:
-                await send_message(telefone, "Não achei seu cadastro. Confirme o telefone informado e tente novamente.")
-                return {"ok": True}
             itens = list_container_items(container_id)
+            # PATCH START: ocultar itens RESGATADO na listagem do cliente
+            itens = [it for it in (itens or []) if (it.get("status_item") != "RESGATADO")]
+            # PATCH END
             await send_message(telefone, render_container(itens))
         except Exception as e:
             print("CONTAINER flow error:", e)
@@ -244,7 +399,13 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
             except Exception as e:
                 print("set_state error (TROCA_CONFIRM):", e)
             nomes = ", ".join(x["nome"] for x in escolhidos)
-            await send_message(telefone, f"Você selecionou: *{nomes}* → total de *{total:.2f} L$*.\nConfirma a conversão? (Responda *S* ou *N*)")
+            msg_confirm = (
+                f"Você selecionou: *{nomes}*.\n"
+                f"Total de crédito: *{total:.2f} L$*.\n"
+                "⚠️ *Atenção*: esta ação é *irreversível*.\n"
+                "Confirma a conversão? (Responda *S* ou *N*)"
+            )
+            await send_message(telefone, msg_confirm)
             return {"ok": True}
 
         if current["state"] == StateNames.TROCA_CONFIRM:
@@ -281,9 +442,6 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
     if upper.startswith("TROCAR"):
         try:
             container_id = get_or_create_open_container(telefone)
-            if not container_id:
-                await send_message(telefone, "Não encontrei um container ativo para você ainda. Confirme seu telefone ou fale com o suporte.")
-                return {"ok": True}
             itens = list_container_items(container_id)
             elegiveis = list_elegiveis(itens)
             if not elegiveis:
@@ -310,9 +468,6 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
         if upper in {"S", "SIM", "CONFIRMO"}:
             try:
                 container_id = get_or_create_open_container(telefone)
-                if not container_id:
-                    await send_message(telefone, "Não encontrei seu container aberto. Confirme o telefone e tente novamente.")
-                    return {"ok": True}
                 itens = list_container_items(container_id)
                 snapshot = [{
                     "jogo": (it.get("jogos") or {}).get("nome", "Jogo"),
@@ -347,25 +502,40 @@ async def webhook(request: Request, x_signature: str | None = Header(default="")
         else:
             await send_message(telefone, "Responda apenas com *S* (sim) ou *N* (não).")
             return {"ok": True}
-
     if upper.startswith("ENVIAR"):
         try:
             container_id = get_or_create_open_container(telefone)
-            if not container_id:
-                await send_message(telefone, "Ainda não temos um container ativo vinculado a este telefone.")
-                return {"ok": True}
             itens = list_container_items(container_id) or []
-            resumo = "\n".join([f"- {(it.get('jogos') or {}).get('nome','Jogo')} ({it.get('origem')}, {it.get('status_item')})" for it in itens]) or "—"
+            # PATCH START: filtrar apenas DISPONIVEL
+            itens = [it for it in itens if it.get("status_item") == "DISPONIVEL"]
+            if not itens:
+                await send_message(telefone, "Não consigo criar envio: seu container está vazio ou só tem itens em PRÉ-VENDA.")
+                await send_message(telefone, render_menu())
+                return {"ok": True}
+            # PATCH END
+            resumo = "\n".join([
+                f"- {(it.get('jogos') or {}).get('nome','(sem nome)')} (origem {it.get('origem')}, {it.get('status_item')})" for it in itens
+            ]) or "—"
+            supa = get_client()
+            cliente = supa.table("clientes").select("endereco, nome").eq("telefone", telefone).single().execute().data
+            endereco = (cliente or {}).get("endereco") or "(endereço não cadastrado)"
             try:
-                set_state(telefone, StateNames.ENVIAR_CONFIRM, {})
+                set_state(telefone, StateNames.ENVIAR_CONFIRM, {"snapshot": itens})
             except Exception as e:
                 print("set_state error (ENVIAR_CONFIRM):", e)
-            await send_message(telefone, "Você está pedindo o *envio do seu container*. Os itens são:\n" + resumo + "\n\nConfirma o pedido? (Responda *S* ou *N*)")
+            confirm_text = (
+                "Você está pedindo o *envio* do seu container com os itens:\n"
+                + resumo
+                + "\n\nEndereço de entrega:\n"
+                + endereco
+                + "\n\n⚠️ *Atenção*: esta ação é *irreversível*.\n"
+                + "Confirma o pedido? (Responda *S* ou *N*)"
+            )
+            await send_message(telefone, confirm_text)
         except Exception as e:
             print("ENVIAR flow error:", e)
             await send_message(telefone, "Não consegui acessar seu container agora. Tente novamente mais tarde.")
         return {"ok": True}
-
-    # Fallback
+# Fallback
     await send_message(telefone, "Não entendi 🤔\n" + render_menu())
     return {"ok": True}
